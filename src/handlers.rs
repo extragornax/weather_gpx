@@ -3,8 +3,8 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
-    response::Html,
+    http::{StatusCode, header},
+    response::{Html, IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,10 @@ pub struct AppState {
 
 pub async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+pub async fn app_css() -> Response {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS).into_response()
 }
 
 #[derive(Deserialize)]
@@ -157,3 +161,4 @@ fn unique_cells(samples: &[KmSample]) -> Vec<(f64, f64)> {
 }
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
+const APP_CSS: &str = include_str!("../static/app.css");
