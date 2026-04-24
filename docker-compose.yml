@@ -4,7 +4,7 @@ services:
     image: meteo_gpx:latest
     container_name: meteo_gpx
     ports:
-      - "9020:3000"
+      - "9013:3000"
     environment:
       PORT: "3000"
       DB_PATH: "/app/data/meteo.db"
