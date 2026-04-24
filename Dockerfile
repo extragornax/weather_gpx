@@ -13,7 +13,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 app \
-    && mkdir -p /app/data /app/static /app/samples \
+    && mkdir -p /app/data /app/static \
     && chown -R app:app /app
 WORKDIR /app
 COPY --from=builder /src/target/release/meteo_gpx /usr/local/bin/meteo_gpx
@@ -21,7 +21,6 @@ COPY static /app/static
 USER app
 ENV PORT=3000
 ENV DB_PATH=/app/data/meteo.db
-ENV SAMPLE_GPX_DIR=/app/samples
 ENV RUST_LOG=info,meteo_gpx=info
 EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

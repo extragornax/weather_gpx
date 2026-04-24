@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
-    http::{StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    extract::State,
+    http::StatusCode,
+    response::Html,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,68 +16,15 @@ use crate::wind::{RidePoint, WindowScore, headwind_exposure, ride_forecast};
 #[derive(Clone)]
 pub struct AppState {
     pub cache: Arc<WeatherCache>,
-    pub samples_dir: PathBuf,
 }
 
 pub async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-#[derive(Serialize)]
-pub struct SampleEntry {
-    pub name: String,
-    pub path: String,
-}
-
-pub async fn list_samples(State(s): State<AppState>) -> Json<Vec<SampleEntry>> {
-    Json(collect_samples(&s.samples_dir))
-}
-
-fn collect_samples(root: &Path) -> Vec<SampleEntry> {
-    let mut out = Vec::new();
-    let mut stack = vec![PathBuf::new()];
-    while let Some(rel) = stack.pop() {
-        let Ok(dir) = std::fs::read_dir(root.join(&rel)) else {
-            continue;
-        };
-        for entry in dir.flatten() {
-            let Ok(name) = entry.file_name().into_string() else { continue };
-            if name.starts_with('.') {
-                continue;
-            }
-            let rel_path = rel.join(&name);
-            let abs = root.join(&rel_path);
-            if abs.is_dir() {
-                stack.push(rel_path);
-            } else if name.to_lowercase().ends_with(".gpx") {
-                out.push(SampleEntry {
-                    name: rel_path.to_string_lossy().to_string(),
-                    path: rel_path.to_string_lossy().to_string(),
-                });
-            }
-        }
-    }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
-pub async fn get_sample(
-    State(s): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-) -> Response {
-    if name.contains("..") || name.starts_with('/') {
-        return (StatusCode::BAD_REQUEST, "bad path").into_response();
-    }
-    let p = s.samples_dir.join(&name);
-    match std::fs::read(&p) {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "application/gpx+xml")], bytes).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
-    }
-}
-
 #[derive(Deserialize)]
 pub struct AnalyzeReq {
-    /// Raw GPX XML (either pasted or fetched from a sample).
+    /// Raw GPX XML.
     pub gpx: String,
     /// RFC3339 timestamp for departure. If omitted, "now" is used.
     #[serde(default)]
@@ -124,36 +70,10 @@ pub async fn analyze(
     };
     let speed = req.speed_kmh.unwrap_or(25.0).max(5.0);
 
-    // Collect every (lat, lon, hour) we need to look up, including the
-    // 48h x 30min window so we only warm the cache once.
+    // Warm the cache once per unique grid cell; the cache fetches a 7-day
+    // hourly block per cell, so every offset of the window sweep is served
+    // from SQLite.
     let unique_cells = unique_cells(&samples);
-    let mut req_list: Vec<(f64, f64, DateTime<Utc>)> = Vec::new();
-    let window_start = start;
-    let window_offsets_min: Vec<i64> = if req.skip_window {
-        vec![0]
-    } else {
-        (0..=(48 * 60)).step_by(30).map(|m| m as i64).collect()
-    };
-    for off in &window_offsets_min {
-        let t0 = window_start + chrono::Duration::minutes(*off);
-        for s in &samples {
-            let eta = t0 + chrono::Duration::seconds(((s.km / speed) * 3600.0) as i64);
-            req_list.push((s.lat, s.lon, eta));
-        }
-    }
-    // Collapse to a unique set (cell, hour) to avoid redundant work inside
-    // the cache. The cache itself is already grid-keyed, so passing duplicates
-    // is cheap but wasteful on Vec size.
-    req_list.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .then(a.2.timestamp().cmp(&b.2.timestamp()))
-    });
-
-    // We only need the cache to be warm for each unique cell — the cache will
-    // fetch a 7-day hourly block per cell, so we don't need to re-request for
-    // every offset. Warm once:
     let warm: Vec<(f64, f64, DateTime<Utc>)> = unique_cells
         .iter()
         .map(|(lat, lon)| (*lat, *lon, start))
@@ -183,7 +103,8 @@ pub async fn analyze(
     let mut window = Vec::new();
     let mut best: Option<(i64, f64)> = None;
     if !req.skip_window {
-        for off in &window_offsets_min {
+        let offsets: Vec<i64> = (0..=(48 * 60)).step_by(30).map(|m| m as i64).collect();
+        for off in &offsets {
             let t0 = start + chrono::Duration::minutes(*off);
             let reqs: Vec<(f64, f64, DateTime<Utc>)> = samples
                 .iter()
@@ -227,10 +148,7 @@ fn unique_cells(samples: &[KmSample]) -> Vec<(f64, f64)> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for s in samples {
-        let key = (
-            (s.lat * 10.0).round() as i64,
-            (s.lon * 10.0).round() as i64,
-        );
+        let key = ((s.lat * 10.0).round() as i64, (s.lon * 10.0).round() as i64);
         if seen.insert(key) {
             out.push((s.lat, s.lon));
         }

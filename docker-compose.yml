@@ -8,17 +8,9 @@ services:
     environment:
       PORT: "3000"
       DB_PATH: "/app/data/meteo.db"
-      SAMPLE_GPX_DIR: "/app/samples"
       RUST_LOG: "info,meteo_gpx=info"
     volumes:
       - meteo_data:/app/data
-      - meteo_samples:/app/samples
-      # To expose sibling-project GPX files (brm_maps / cyclo_copains), add a
-      # docker-compose.override.yml with e.g.:
-      #   services:
-      #     meteo:
-      #       volumes:
-      #         - /srv/brm_maps/data/gpx:/app/samples/brm:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
@@ -29,4 +21,3 @@ services:
 
 volumes:
   meteo_data:
-  meteo_samples:

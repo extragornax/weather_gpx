@@ -33,17 +33,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let cache = Arc::new(WeatherCache::open(&db_path)?);
 
-    let samples_dir = std::env::var("SAMPLE_GPX_DIR").unwrap_or_else(|_| "samples".into());
-
-    let state = AppState {
-        cache,
-        samples_dir: PathBuf::from(samples_dir),
-    };
+    let state = AppState { cache };
 
     let app = Router::new()
         .route("/", get(handlers::index))
-        .route("/api/samples", get(handlers::list_samples))
-        .route("/api/sample/*name", get(handlers::get_sample))
         .route("/api/analyze", post(handlers::analyze))
         .nest_service("/static", ServeDir::new("static"))
         .with_state(state)
