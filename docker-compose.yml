@@ -1,0 +1,22 @@
+services:
+  meteo:
+    build: .
+    image: meteo_gpx:latest
+    container_name: meteo_gpx
+    ports:
+      - "9020:3000"
+    environment:
+      PORT: "3000"
+      DB_PATH: "/app/data/meteo.db"
+      SAMPLE_GPX_DIR: "/app/samples"
+      RUST_LOG: "info,meteo_gpx=info"
+    volumes:
+      - meteo_data:/app/data
+      # Mount sample GPX directories read-only from sibling projects on the host.
+      # Override on deploy:
+      #   docker compose up -d with /srv/brm_maps/data/gpx mounted to /app/samples/brm
+      - ./samples:/app/samples:ro
+    restart: unless-stopped
+
+volumes:
+  meteo_data:

@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>meteo_gpx — per-km forecast for your ride</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>meteo_gpx</h1>
+    <p class="subtitle">
+      Paste a GPX, pick a departure, get a per-km forecast: temperature, rain
+      probability, and wind projected onto your heading. The departure-window
+      picker re-simulates the ride at 30 min offsets over 48 h and highlights
+      the start that minimises headwind exposure.
+    </p>
+  </header>
+
+  <form id="f" class="card">
+    <div class="field">
+      <label for="sample">Sample GPX</label>
+      <select id="sample">
+        <option value="">— none —</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="gpx">Or paste GPX XML</label>
+      <textarea id="gpx" placeholder="<?xml version='1.0' ...><gpx>..." rows="6"></textarea>
+    </div>
+
+    <div class="field">
+      <label for="upload">Or upload a file</label>
+      <input type="file" id="upload" accept=".gpx,application/gpx+xml,text/xml">
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="start">Start (local time)</label>
+        <input type="datetime-local" id="start">
+      </div>
+      <div class="field">
+        <label for="speed">Avg speed (km/h)</label>
+        <input type="number" id="speed" value="25" min="5" max="60" step="1">
+      </div>
+    </div>
+
+    <button type="submit">Forecast</button>
+    <p id="status" class="status"></p>
+  </form>
+
+  <section id="results" hidden>
+    <div class="card">
+      <h2>Elevation + weather strip</h2>
+      <div id="legend" class="legend"></div>
+      <div class="chart-wrap">
+        <svg id="chart" viewBox="0 0 1200 420" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Best departure window (next 48 h)</h2>
+      <p class="hint">Each cell is a 30 min departure offset. Darker = more headwind
+        exposure. Click a cell to re-render the strip for that start time.</p>
+      <div id="window"></div>
+    </div>
+
+    <div class="card">
+      <h2>Per-km table</h2>
+      <div class="table-wrap">
+        <table id="tbl">
+          <thead>
+            <tr>
+              <th>km</th>
+              <th>time</th>
+              <th>°C</th>
+              <th>rain%</th>
+              <th>wind km/h</th>
+              <th>headwind km/h</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let lastResp = null;
+let lastGpx = null;
+
+async function loadSamples() {
+  try {
+    const r = await fetch('/api/samples');
+    const list = await r.json();
+    const sel = $('#sample');
+    for (const s of list) {
+      const opt = document.createElement('option');
+      opt.value = s.path;
+      opt.textContent = s.name;
+      sel.appendChild(opt);
+    }
+  } catch (_) {}
+}
+
+function initStartTime() {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  d.setSeconds(0, 0);
+  // Round up to next 30 min.
+  d.setMinutes(Math.ceil(d.getMinutes() / 30) * 30);
+  $('#start').value = d.toISOString().slice(0, 16);
+}
+
+async function submit(ev) {
+  ev.preventDefault();
+  $('#status').textContent = 'Fetching forecast…';
+  let gpx = $('#gpx').value.trim();
+  const sample = $('#sample').value;
+  const upload = $('#upload').files[0];
+  try {
+    if (upload) {
+      gpx = await upload.text();
+    } else if (!gpx && sample) {
+      const r = await fetch('/api/sample/' + encodeURIComponent(sample));
+      if (!r.ok) throw new Error('sample fetch failed');
+      gpx = await r.text();
+    }
+    if (!gpx) throw new Error('no GPX provided');
+    lastGpx = gpx;
+    const local = $('#start').value;
+    const start = local ? new Date(local).toISOString() : null;
+    const speed_kmh = Number($('#speed').value) || 25;
+    const resp = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ gpx, start, speed_kmh }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    lastResp = data;
+    render(data);
+    $('#results').hidden = false;
+    $('#status').textContent = '';
+  } catch (e) {
+    $('#status').textContent = 'Error: ' + (e.message || e);
+  }
+}
+
+async function resubmitWithStart(startUnix) {
+  if (!lastGpx) return;
+  $('#status').textContent = 'Re-simulating for new start…';
+  const start = new Date(startUnix * 1000).toISOString();
+  const speed_kmh = Number($('#speed').value) || 25;
+  const resp = await fetch('/api/analyze', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ gpx: lastGpx, start, speed_kmh, skip_window: true }),
+  });
+  if (!resp.ok) { $('#status').textContent = 'Error'; return; }
+  const data = await resp.json();
+  // Keep the old window data; only refresh the strip + table.
+  lastResp = { ...data, window: lastResp.window, best_window_start_unix: lastResp.best_window_start_unix };
+  render(lastResp);
+  $('#status').textContent = '';
+}
+
+function tempColor(c) {
+  if (c == null) return '#ccc';
+  // Blue (cold) → green (mild) → red (hot).
+  const clamp = v => Math.max(0, Math.min(255, v|0));
+  if (c < 10) {
+    const t = (c + 10) / 20;
+    return `rgb(${clamp(40 + 80*t)}, ${clamp(120 + 100*t)}, ${clamp(220 - 60*t)})`;
+  } else if (c < 25) {
+    const t = (c - 10) / 15;
+    return `rgb(${clamp(100 + 155*t)}, ${clamp(220 - 60*t)}, ${clamp(120 - 80*t)})`;
+  } else {
+    const t = Math.min(1, (c - 25) / 15);
+    return `rgb(255, ${clamp(160 - 100*t)}, ${clamp(40)})`;
+  }
+}
+
+function headwindColor(hw) {
+  if (hw == null) return '#ccc';
+  // Headwind red, tailwind green, crosswind grey.
+  const m = Math.min(40, Math.abs(hw)) / 40;
+  if (hw > 1) return `rgb(${180 + 60*m|0}, ${80 - 60*m|0}, ${80 - 60*m|0})`;
+  if (hw < -1) return `rgb(${80 - 40*m|0}, ${160 + 80*m|0}, ${80 - 40*m|0})`;
+  return '#9aa';
+}
+
+function render(data) {
+  renderChart(data);
+  renderWindow(data);
+  renderTable(data);
+}
+
+function renderChart(data) {
+  const svg = $('#chart');
+  svg.innerHTML = '';
+  const W = 1200, H = 420;
+  const M = { l: 44, r: 16, t: 16, b: 80 };
+  const plotW = W - M.l - M.r;
+  const elevH = 220;
+  const stripH = 80;
+  const elevY0 = M.t;
+  const elevY1 = elevY0 + elevH;
+  const stripY0 = elevY1 + 16;
+  const stripY1 = stripY0 + stripH;
+
+  const pts = data.samples;
+  if (!pts.length) return;
+  const xMax = data.total_km;
+  let eMin = Infinity, eMax = -Infinity;
+  for (const p of pts) { if (p.ele < eMin) eMin = p.ele; if (p.ele > eMax) eMax = p.ele; }
+  if (!isFinite(eMin) || eMin === eMax) { eMin = 0; eMax = 100; }
+  const pad = (eMax - eMin) * 0.1 || 10;
+  eMin -= pad; eMax += pad;
+
+  const x = km => M.l + (km / xMax) * plotW;
+  const y = ele => elevY1 - ((ele - eMin) / (eMax - eMin)) * elevH;
+
+  // Elevation fill.
+  let d = `M ${x(pts[0].km)} ${elevY1} `;
+  for (const p of pts) d += `L ${x(p.km)} ${y(p.ele)} `;
+  d += `L ${x(pts[pts.length-1].km)} ${elevY1} Z`;
+  svg.insertAdjacentHTML('beforeend', `<path d="${d}" fill="rgba(74,144,217,0.15)" stroke="#4a90d9" stroke-width="1.5"/>`);
+
+  // Y axis ticks.
+  for (let k = 0; k <= 4; k++) {
+    const v = eMin + (eMax - eMin) * (k/4);
+    const yy = y(v);
+    svg.insertAdjacentHTML('beforeend',
+      `<line x1="${M.l}" x2="${W - M.r}" y1="${yy}" y2="${yy}" stroke="#eee"/>
+       <text x="4" y="${yy+4}" font-size="11" fill="#777">${v.toFixed(0)}m</text>`);
+  }
+
+  // Temperature strip (filled rectangles per km segment).
+  for (let i = 1; i < pts.length; i++) {
+    const x0 = x(pts[i-1].km), x1 = x(pts[i].km);
+    const c = tempColor(pts[i].temperature_c);
+    svg.insertAdjacentHTML('beforeend',
+      `<rect x="${x0}" y="${stripY0}" width="${x1-x0}" height="${stripH/2}" fill="${c}"/>`);
+  }
+  // Rain bars (bottom half of strip).
+  const rainY0 = stripY0 + stripH/2;
+  for (let i = 1; i < pts.length; i++) {
+    const x0 = x(pts[i-1].km), x1 = x(pts[i].km);
+    const prob = pts[i].precip_prob ?? 0;
+    const h = (prob / 100) * (stripH/2);
+    svg.insertAdjacentHTML('beforeend',
+      `<rect x="${x0}" y="${stripY1 - h}" width="${x1-x0}" height="${h}" fill="rgba(60,120,200,0.7)"/>`);
+  }
+  svg.insertAdjacentHTML('beforeend',
+    `<rect x="${M.l}" y="${stripY0}" width="${plotW}" height="${stripH}" fill="none" stroke="#333"/>`);
+
+  // Wind arrows across the strip (every ~25 km, capped).
+  const arrowEvery = Math.max(1, Math.ceil(pts.length / 40));
+  for (let i = 0; i < pts.length; i += arrowEvery) {
+    const p = pts[i];
+    if (p.wind_speed_kmh == null) continue;
+    const ax = x(p.km);
+    const ay = stripY0 - 6;
+    // Arrow points in the direction the rider feels the wind blowing —
+    // that is, the direction the wind is going TOWARD (wind_dir + 180).
+    const rad = ((p.wind_dir_deg + 180) - 90) * Math.PI / 180; // SVG 0 = east
+    const len = Math.min(22, 4 + p.wind_speed_kmh * 0.6);
+    const dx = Math.cos(rad) * len, dy = Math.sin(rad) * len;
+    const hw = p.headwind_kmh;
+    const col = headwindColor(hw);
+    svg.insertAdjacentHTML('beforeend',
+      `<line x1="${ax - dx/2}" y1="${ay - dy/2}" x2="${ax + dx/2}" y2="${ay + dy/2}"
+             stroke="${col}" stroke-width="2" marker-end="url(#arrow)"/>`);
+  }
+  svg.insertAdjacentHTML('afterbegin',
+    `<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5"
+       markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+       <path d="M 0 0 L 10 5 L 0 10 Z" fill="currentColor"/>
+     </marker></defs>`);
+
+  // X axis km labels.
+  const step = xMax > 200 ? 50 : xMax > 80 ? 20 : xMax > 30 ? 10 : 5;
+  for (let km = 0; km <= xMax; km += step) {
+    const xx = x(km);
+    svg.insertAdjacentHTML('beforeend',
+      `<line x1="${xx}" y1="${stripY1}" x2="${xx}" y2="${stripY1 + 4}" stroke="#555"/>
+       <text x="${xx}" y="${stripY1 + 18}" text-anchor="middle" font-size="11" fill="#333">${km} km</text>`);
+  }
+
+  // Legend.
+  const startDate = new Date(data.start_unix * 1000);
+  const endDate = new Date((data.samples.at(-1).eta_unix) * 1000);
+  $('#legend').innerHTML =
+    `Depart <b>${startDate.toLocaleString()}</b> · arrive <b>${endDate.toLocaleString()}</b> ·
+     ${data.total_km.toFixed(1)} km @ ${data.speed_kmh.toFixed(0)} km/h`;
+}
+
+function renderWindow(data) {
+  const el = $('#window');
+  el.innerHTML = '';
+  if (!data.window.length) { el.textContent = '(not computed)'; return; }
+  const scores = data.window.map(w => w.exposure);
+  const worst = Math.max(...scores);
+  const best = Math.min(...scores);
+  const bestStart = data.best_window_start_unix;
+
+  const grid = document.createElement('div');
+  grid.className = 'win-grid';
+
+  for (const w of data.window) {
+    const t = (w.exposure - best) / Math.max(1e-6, (worst - best));
+    const shade = Math.round(240 - t * 180);
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'win-cell' + (w.start_unix === bestStart ? ' best' : '');
+    cell.style.background = `rgb(${shade}, ${shade}, ${Math.min(255, shade + 15)})`;
+    const d = new Date(w.start_unix * 1000);
+    cell.title = `${d.toLocaleString()} — exposure ${w.exposure.toFixed(1)}`;
+    cell.textContent = d.getHours().toString().padStart(2, '0') + ':' +
+                       d.getMinutes().toString().padStart(2, '0');
+    cell.onclick = () => resubmitWithStart(w.start_unix);
+    grid.appendChild(cell);
+  }
+
+  if (bestStart) {
+    const d = new Date(bestStart * 1000);
+    const note = document.createElement('p');
+    note.className = 'hint';
+    note.innerHTML = `Best: <b>${d.toLocaleString()}</b>`;
+    el.appendChild(note);
+  }
+  el.appendChild(grid);
+}
+
+function renderTable(data) {
+  const tb = $('#tbl tbody');
+  tb.innerHTML = '';
+  // Downsample for long rides.
+  const step = Math.max(1, Math.ceil(data.samples.length / 40));
+  for (let i = 0; i < data.samples.length; i += step) {
+    const p = data.samples[i];
+    const d = new Date(p.eta_unix * 1000);
+    const row = document.createElement('tr');
+    row.innerHTML =
+      `<td>${p.km.toFixed(1)}</td>
+       <td>${d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</td>
+       <td>${p.temperature_c?.toFixed(1) ?? '—'}</td>
+       <td>${p.precip_prob?.toFixed(0) ?? '—'}</td>
+       <td>${p.wind_speed_kmh?.toFixed(0) ?? '—'}</td>
+       <td style="color:${headwindColor(p.headwind_kmh)}">
+         ${p.headwind_kmh == null ? '—' : (p.headwind_kmh > 0 ? '+' : '') + p.headwind_kmh.toFixed(0)}
+       </td>`;
+    tb.appendChild(row);
+  }
+}
+
+loadSamples();
+initStartTime();
+$('#f').addEventListener('submit', submit);
+</script>
+</body>
+</html>
