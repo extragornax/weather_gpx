@@ -10,7 +10,7 @@ RUN cargo build --release --locked || cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates wget \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 app \
     && mkdir -p /app/data /app/static /app/samples \
@@ -24,4 +24,6 @@ ENV DB_PATH=/app/data/meteo.db
 ENV SAMPLE_GPX_DIR=/app/samples
 ENV RUST_LOG=info,meteo_gpx=info
 EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -qO- "http://127.0.0.1:${PORT}/" >/dev/null || exit 1
 CMD ["meteo_gpx"]

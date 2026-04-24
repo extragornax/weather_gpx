@@ -12,11 +12,21 @@ services:
       RUST_LOG: "info,meteo_gpx=info"
     volumes:
       - meteo_data:/app/data
-      # Mount sample GPX directories read-only from sibling projects on the host.
-      # Override on deploy:
-      #   docker compose up -d with /srv/brm_maps/data/gpx mounted to /app/samples/brm
-      - ./samples:/app/samples:ro
+      - meteo_samples:/app/samples
+      # To expose sibling-project GPX files (brm_maps / cyclo_copains), add a
+      # docker-compose.override.yml with e.g.:
+      #   services:
+      #     meteo:
+      #       volumes:
+      #         - /srv/brm_maps/data/gpx:/app/samples/brm:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
 volumes:
   meteo_data:
+  meteo_samples:
