@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..900,0..100;1,9..144,300..900,0..100&family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/meteo/static/app.css">
 </head>
 <body>
 
@@ -203,7 +203,7 @@ async function submit(ev) {
     const local = $('#start').value;
     const start = local ? new Date(local).toISOString() : null;
     const speed_kmh = Number($('#speed').value) || 25;
-    const resp = await fetch('/api/analyze', {
+    const resp = await fetch('/meteo/api/analyze', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ gpx, start, speed_kmh }),
@@ -230,7 +230,7 @@ async function resubmitWithStart(startUnix) {
   try {
     const start = new Date(startUnix * 1000).toISOString();
     const speed_kmh = Number($('#speed').value) || 25;
-    const resp = await fetch('/api/analyze', {
+    const resp = await fetch('/meteo/api/analyze', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ gpx: lastGpx, start, speed_kmh, skip_window: true }),
