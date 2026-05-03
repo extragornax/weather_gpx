@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    response::Redirect,
+    response::Html,
     routing::{get, post},
 };
 use tower_http::trace::TraceLayer;
@@ -42,7 +42,17 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let app = Router::new()
-        .route("/", get(|| async { Redirect::permanent("/meteo") }))
+        .route("/", get(|| async {
+            Html(r#"<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="4;url=https://gpx.extragornax.fr/meteo">
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f2e9d4;color:#0a1f3b}
+.box{text-align:center;max-width:480px;padding:2rem}.box h1{font-size:1.4rem;margin:0 0 .8rem}.box p{margin:0 0 .6rem;line-height:1.5}
+a{color:#b8242a}</style></head><body><div class="box">
+<h1>This service has moved</h1>
+<p>Meteo Dispatch now lives at<br><a href="https://gpx.extragornax.fr/meteo">gpx.extragornax.fr/meteo</a></p>
+<p style="font-size:.85rem;opacity:.7">Redirecting in a few seconds…</p>
+</div></body></html>"#)
+        }))
         .nest("/meteo", meteo)
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(TraceLayer::new_for_http());
